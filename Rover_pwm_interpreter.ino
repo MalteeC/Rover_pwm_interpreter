@@ -181,17 +181,25 @@ void driveFromChannels(int throttleUs, int steeringUs) {
   setDriveMotorGroup(rightDriveMotorNumbers, DRIVE_MOTORS_PER_SIDE, rightSpeed);
 }
 
+int centeredRcToFullSpeed(int rcValue) {
+  int centered = constrain(rcValue, RC_MIN_US, RC_MAX_US) - RC_CENTER_US;
+
+  if (abs(centered) <= RC_DEADBAND_US) {
+    return 0;
+  }
+
+  return centered > 0 ? 255 : -255;
+}
+
 void armFromChannel(int armUs) {
-  setMotor(armLiftMotor, centeredRcToSpeed(armUs));
+  setMotor(armLiftMotor, centeredRcToFullSpeed(armUs));
 }
 
 void bunkerFromChannel(int bunkerUs) {
-  const int bunkerSlowPwm = 90;
-
   if (bunkerUs < 1400) {
-    setMotor(bunkerLiftMotor, -bunkerSlowPwm);
+    setMotor(bunkerLiftMotor, -255);
   } else if (bunkerUs > 1600) {
-    setMotor(bunkerLiftMotor, bunkerSlowPwm);
+    setMotor(bunkerLiftMotor, 255);
   } else {
     setMotor(bunkerLiftMotor, 0);
   }
@@ -301,4 +309,5 @@ void loop() {
     printChannels(channels);
   }
 }
+
 
