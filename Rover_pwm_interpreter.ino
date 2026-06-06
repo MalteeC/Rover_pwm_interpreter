@@ -1,27 +1,29 @@
+#include <avr/interrupt.h>
+
 // Rover PWM interpreter for Arduino Mega + INAV PWM outputs.
 //
 // FC PWM inputs, stored as integer pulse widths in microseconds:
-//   S1 pin 2  = drive forward/back, 1500 stop
-//   S2 pin 3  = steering left/right, 1500 center
-//   S3 pin 18 = arm / shovel wheel lift up/down, 1500 stop
-//   S4 pin 19 = shovel wheel rotation speed, 1200 off, 1800 max
-//   S5 pin 20 = bunker up/down, <1400 slow one way, >1600 slow other way
+//   S1 pin 18 = drive forward/back, 1500 stop
+//   S2 pin 19 = steering left/right, 1500 center
+//   S3 pin 20 = arm / shovel wheel lift up/down, 1500 stop
+//   S4 pin 21 = shovel wheel rotation speed, 1200 off, 1800 max
+//   S5 pin 10 = bunker up/down, <1400 slow one way, >1600 slow other way
 //
 // L298N outputs:
-//   Drive motor 1 = front left
-//   Drive motor 2 = front right
-//   Drive motor 3 = middle left
-//   Drive motor 4 = middle right
-//   Drive motor 5 = rear left
-//   Drive motor 6 = rear right
-//   1 arm lift motor
-//   1 bunker lift motor
+//   Motor 1 = left front:   EN 4, IN-forward 23, IN-backward 22
+//   Motor 2 = left middle:  EN 8, IN-forward 30, IN-backward 31
+//   Motor 3 = left rear:    EN 5, IN-forward 24, IN-backward 25
+//   Motor 4 = right front:  EN 6, IN-forward 27, IN-backward 26
+//   Motor 5 = right middle: EN 9, IN-forward 33, IN-backward 32
+//   Motor 6 = right rear:   EN 7, IN-forward 29, IN-backward 28
+//   AK1 arm lift:           EN 2, IN-forward 34, IN-backward 35
+//   AK2 bunker lift:        EN 3, IN-forward 36, IN-backward 37
 //
 // DRV8825 for NEMA17 shovel wheel rotation:
 //   EN is permanently wired to GND, so only STEP/DIR are controlled here.
 
 const byte PWM_CHANNEL_COUNT = 5;
-const byte pwmInputPins[PWM_CHANNEL_COUNT] = {2, 3, 18, 19, 20};
+const byte pwmInputPins[PWM_CHANNEL_COUNT] = {18, 19, 20, 21, 10};
 
 const int RC_MIN_US = 1000;
 const int RC_CENTER_US = 1500;
@@ -43,22 +45,22 @@ const byte DRIVE_MOTOR_COUNT = 6;
 const byte DRIVE_MOTORS_PER_SIDE = 3;
 
 const DcMotorPins driveMotors[DRIVE_MOTOR_COUNT] = {
-  {4, 22, 23},   // Motor 1: front left
-  {7, 28, 29},   // Motor 2: front right
-  {5, 24, 25},   // Motor 3: middle left
-  {8, 30, 31},   // Motor 4: middle right
-  {6, 26, 27},   // Motor 5: rear left
-  {9, 32, 33}    // Motor 6: rear right
+  {4, 23, 22},   // Motor 1: left front
+  {8, 30, 31},   // Motor 2: left middle
+  {5, 24, 25},   // Motor 3: left rear
+  {6, 27, 26},   // Motor 4: right front
+  {9, 33, 32},   // Motor 5: right middle
+  {7, 29, 28}    // Motor 6: right rear
 };
 
-const byte leftDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {1, 3, 5};
-const byte rightDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {2, 4, 6};
+const byte leftDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {1, 2, 3};
+const byte rightDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {4, 5, 6};
 
-const DcMotorPins armLiftMotor = {10, 34, 35};
-const DcMotorPins bunkerLiftMotor = {11, 36, 37};
+const DcMotorPins armLiftMotor = {2, 34, 35};
+const DcMotorPins bunkerLiftMotor = {3, 36, 37};
 
-const byte SHOVEL_STEP_PIN = 46;
-const byte SHOVEL_DIR_PIN = 48;
+const byte SHOVEL_STEP_PIN = 44;
+const byte SHOVEL_DIR_PIN = 45;
 const byte SHOVEL_FIXED_DIR = HIGH;
 const int SHOVEL_OFF_US = 1200;
 const int SHOVEL_MAX_US = 1800;
@@ -67,6 +69,7 @@ const unsigned int SHOVEL_MAX_STEPS_PER_SEC = 1800;
 
 unsigned long lastShovelStepUs = 0;
 unsigned long shovelStepIntervalUs = 0;
+volatile bool lastPwmPin10High = false;
 
 void handlePwmChange(byte channel) {
   if (digitalRead(pwmInputPins[channel]) == HIGH) {
@@ -88,6 +91,26 @@ void handleChannel2() { handlePwmChange(1); }
 void handleChannel3() { handlePwmChange(2); }
 void handleChannel4() { handlePwmChange(3); }
 void handleChannel5() { handlePwmChange(4); }
+
+ISR(PCINT0_vect) {
+  bool pin10High = (PINB & _BV(PB4)) != 0;
+
+  if (pin10High != lastPwmPin10High) {
+    lastPwmPin10High = pin10High;
+    handleChannel5();
+  }
+}
+
+void setupPwmInputInterrupts() {
+  attachInterrupt(digitalPinToInterrupt(pwmInputPins[0]), handleChannel1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pwmInputPins[1]), handleChannel2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pwmInputPins[2]), handleChannel3, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(pwmInputPins[3]), handleChannel4, CHANGE);
+
+  lastPwmPin10High = digitalRead(pwmInputPins[4]) == HIGH;
+  PCICR |= _BV(PCIE0);
+  PCMSK0 |= _BV(PCINT4);
+}
 
 void setupMotor(const DcMotorPins &motor) {
   pinMode(motor.en, OUTPUT);
@@ -258,11 +281,7 @@ void setup() {
   digitalWrite(SHOVEL_STEP_PIN, LOW);
   digitalWrite(SHOVEL_DIR_PIN, SHOVEL_FIXED_DIR);
 
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[0]), handleChannel1, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[1]), handleChannel2, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[2]), handleChannel3, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[3]), handleChannel4, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[4]), handleChannel5, CHANGE);
+  setupPwmInputInterrupts();
 }
 
 void loop() {
@@ -282,5 +301,4 @@ void loop() {
     printChannels(channels);
   }
 }
-
 
