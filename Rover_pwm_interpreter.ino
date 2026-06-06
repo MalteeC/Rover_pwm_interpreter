@@ -8,7 +8,12 @@
 //   S5 pin 20 = bunker up/down, <1400 slow one way, >1600 slow other way
 //
 // L298N outputs:
-//   6 drive motors: 3 left, 3 right
+//   Drive motor 1 = front left
+//   Drive motor 2 = front right
+//   Drive motor 3 = middle left
+//   Drive motor 4 = middle right
+//   Drive motor 5 = rear left
+//   Drive motor 6 = rear right
 //   1 arm lift motor
 //   1 bunker lift motor
 //
@@ -34,19 +39,20 @@ struct DcMotorPins {
   byte in2;
 };
 
+const byte DRIVE_MOTOR_COUNT = 6;
 const byte DRIVE_MOTORS_PER_SIDE = 3;
 
-const DcMotorPins leftDriveMotors[DRIVE_MOTORS_PER_SIDE] = {
-  {4, 22, 23},
-  {5, 24, 25},
-  {6, 26, 27}
+const DcMotorPins driveMotors[DRIVE_MOTOR_COUNT] = {
+  {4, 22, 23},   // Motor 1: front left
+  {7, 28, 29},   // Motor 2: front right
+  {5, 24, 25},   // Motor 3: middle left
+  {8, 30, 31},   // Motor 4: middle right
+  {6, 26, 27},   // Motor 5: rear left
+  {9, 32, 33}    // Motor 6: rear right
 };
 
-const DcMotorPins rightDriveMotors[DRIVE_MOTORS_PER_SIDE] = {
-  {7, 28, 29},
-  {8, 30, 31},
-  {9, 32, 33}
-};
+const byte leftDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {1, 3, 5};
+const byte rightDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {2, 4, 6};
 
 const DcMotorPins armLiftMotor = {10, 34, 35};
 const DcMotorPins bunkerLiftMotor = {11, 36, 37};
@@ -113,9 +119,17 @@ void setMotor(const DcMotorPins &motor, int speed) {
   }
 }
 
-void setMotorGroup(const DcMotorPins motors[], byte count, int speed) {
+void setDriveMotor(byte motorNumber, int speed) {
+  if (motorNumber < 1 || motorNumber > DRIVE_MOTOR_COUNT) {
+    return;
+  }
+
+  setMotor(driveMotors[motorNumber - 1], speed);
+}
+
+void setDriveMotorGroup(const byte motorNumbers[], byte count, int speed) {
   for (byte i = 0; i < count; i++) {
-    setMotor(motors[i], speed);
+    setDriveMotor(motorNumbers[i], speed);
   }
 }
 
@@ -140,8 +154,8 @@ void driveFromChannels(int throttleUs, int steeringUs) {
   int leftSpeed = constrain(throttle + steering, -255, 255);
   int rightSpeed = constrain(throttle - steering, -255, 255);
 
-  setMotorGroup(leftDriveMotors, DRIVE_MOTORS_PER_SIDE, leftSpeed);
-  setMotorGroup(rightDriveMotors, DRIVE_MOTORS_PER_SIDE, rightSpeed);
+  setDriveMotorGroup(leftDriveMotorNumbers, DRIVE_MOTORS_PER_SIDE, leftSpeed);
+  setDriveMotorGroup(rightDriveMotorNumbers, DRIVE_MOTORS_PER_SIDE, rightSpeed);
 }
 
 void armFromChannel(int armUs) {
@@ -232,9 +246,8 @@ void setup() {
     lastValidPulseUs[i] = micros();
   }
 
-  for (byte i = 0; i < DRIVE_MOTORS_PER_SIDE; i++) {
-    setupMotor(leftDriveMotors[i]);
-    setupMotor(rightDriveMotors[i]);
+  for (byte i = 0; i < DRIVE_MOTOR_COUNT; i++) {
+    setupMotor(driveMotors[i]);
   }
 
   setupMotor(armLiftMotor);
@@ -269,4 +282,5 @@ void loop() {
     printChannels(channels);
   }
 }
+
 
