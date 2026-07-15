@@ -1,66 +1,73 @@
-#include <avr/interrupt.h>
-
-// Rover PWM interpreter for Arduino Mega + INAV PWM outputs.
+// Rover PWM and serial interpreter for Arduino Mega.
 //
-// FC PWM inputs, stored as integer pulse widths in microseconds:
-//   S1 pin 18 = drive forward/back, 1500 stop
-//   S2 pin 19 = steering left/right, 1500 center
-//   S3 pin 20 = arm / shovel wheel lift up/down, 1500 stop
-//   S4 pin 21 = shovel wheel rotation speed, 1200 off, 1800 max
-//   S5 pin 10 = bunker up/down, <1400 slow one way, >1600 slow other way
+// Input control:
+//   FC PWM inputs are read on S1-S5 pins below.
+//   Serial override accepts one line: s1,s2,s3,s4,s5\n at 115200 baud.
+//   Example from Python: 1500,1500,1500,1200,1500
 //
-// L298N outputs:
-//   Motor 1 = left front:   EN 4, IN-forward 23, IN-backward 22
-//   Motor 2 = left middle:  EN 8, IN-forward 30, IN-backward 31
-//   Motor 3 = left rear:    EN 5, IN-forward 24, IN-backward 25
-//   Motor 4 = right front:  EN 6, IN-forward 27, IN-backward 26
-//   Motor 5 = right middle: EN 9, IN-forward 33, IN-backward 32
-//   Motor 6 = right rear:   EN 7, IN-forward 29, IN-backward 28
-//   AK1 arm lift:           EN 2, IN-forward 34, IN-backward 35
-//   AK2 bunker lift:        EN 3, IN-forward 36, IN-backward 37
+// FC PWM inputs:
+//   S1 pin 40 = drive forward/back, 1500 stop
+//   S2 pin 38 = steering left/right, 1500 center
+//   S3 pin 36 = arm up/down, 1500 stop
+//   S4 pin 34 = shovel wheel stepper speed, 1200 off, 1800 max
+//   S5 pin 32 = bunker up/down, <1400 one way, >1600 other way
+//
+// L298N motor pins, two wires per motor:
+//   M1 left front:   A 2,  B 3   (both PWM)
+//   M2 right front:  A 4,  B 5   (both PWM)
+//   M3 left middle:  A 6,  B 7   (both PWM)
+//   M4 right middle: A 8,  B 9   (both PWM)
+//   M5 left rear:    A 10, B 11  (both PWM)
+//   M6 right rear:   A 12, B 13  (both PWM)
+//   M7 arm:          A 24, B 25  (full speed digital)
+//   M8 bunker:       A 28, B 29  (full speed digital)
 //
 // DRV8825 for NEMA17 shovel wheel rotation:
-//   EN is permanently wired to GND, so only STEP/DIR are controlled here.
+//   STEP pin 45
+//   DIR  pin 44
+//   EN is permanently wired to GND.
 
-const byte PWM_CHANNEL_COUNT = 5;
-const byte pwmInputPins[PWM_CHANNEL_COUNT] = {18, 19, 20, 21, 10};
+const byte CHANNEL_COUNT = 5;
+const byte pwmInputPins[CHANNEL_COUNT] = {40, 38, 36, 34, 32};
 
 const int RC_MIN_US = 1000;
 const int RC_CENTER_US = 1500;
 const int RC_MAX_US = 2000;
 const int RC_DEADBAND_US = 45;
-const unsigned long SIGNAL_TIMEOUT_US = 300000UL;
+const unsigned long PWM_SIGNAL_TIMEOUT_US = 300000UL;
+const unsigned long SERIAL_CONTROL_TIMEOUT_MS = 300UL;
 
-volatile unsigned long pulseStartUs[PWM_CHANNEL_COUNT];
-volatile unsigned long lastValidPulseUs[PWM_CHANNEL_COUNT];
-volatile int rcUs[PWM_CHANNEL_COUNT] = {1500, 1500, 1500, 1200, 1500};
+int rcUs[CHANNEL_COUNT] = {1500, 1500, 1500, 1200, 1500};
+int serialUs[CHANNEL_COUNT] = {1500, 1500, 1500, 1200, 1500};
+unsigned long lastValidPwmUs[CHANNEL_COUNT] = {0, 0, 0, 0, 0};
+unsigned long lastSerialPacketMs = 0;
 
-struct DcMotorPins {
-  byte en;
-  byte in1;
-  byte in2;
+struct MotorPins {
+  byte a;
+  byte b;
 };
 
-const byte DRIVE_MOTOR_COUNT = 6;
+const byte MOTOR_COUNT = 8;
 const byte DRIVE_MOTORS_PER_SIDE = 3;
 
-const DcMotorPins driveMotors[DRIVE_MOTOR_COUNT] = {
-  {4, 23, 22},   // Motor 1: left front
-  {8, 30, 31},   // Motor 2: left middle
-  {5, 24, 25},   // Motor 3: left rear
-  {6, 27, 26},   // Motor 4: right front
-  {9, 33, 32},   // Motor 5: right middle
-  {7, 29, 28}    // Motor 6: right rear
+const MotorPins motors[MOTOR_COUNT] = {
+  {2, 3},    // M1: left front, PWM/PWM
+  {4, 5},    // M2: right front, PWM/PWM
+  {6, 7},    // M3: left middle, PWM/PWM
+  {8, 9},    // M4: right middle, PWM/PWM
+  {10, 11},  // M5: left rear, PWM/PWM
+  {12, 13},  // M6: right rear, PWM/PWM
+  {24, 25},  // M7: arm, full speed digital
+  {28, 29}   // M8: bunker, full speed digital
 };
 
-const byte leftDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {1, 2, 3};
-const byte rightDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {4, 5, 6};
+const byte leftDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {1, 3, 5};
+const byte rightDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {2, 4, 6};
+const byte ARM_MOTOR_NUMBER = 7;
+const byte BUNKER_MOTOR_NUMBER = 8;
 
-const DcMotorPins armLiftMotor = {2, 34, 35};
-const DcMotorPins bunkerLiftMotor = {3, 36, 37};
-
-const byte SHOVEL_STEP_PIN = 44;
-const byte SHOVEL_DIR_PIN = 45;
+const byte SHOVEL_DIR_PIN = 44;
+const byte SHOVEL_STEP_PIN = 45;
 const byte SHOVEL_FIXED_DIR = HIGH;
 const int SHOVEL_OFF_US = 1200;
 const int SHOVEL_MAX_US = 1800;
@@ -69,90 +76,60 @@ const unsigned int SHOVEL_MAX_STEPS_PER_SEC = 1800;
 
 unsigned long lastShovelStepUs = 0;
 unsigned long shovelStepIntervalUs = 0;
-volatile bool lastPwmPin10High = false;
 
-void handlePwmChange(byte channel) {
-  if (digitalRead(pwmInputPins[channel]) == HIGH) {
-    pulseStartUs[channel] = micros();
-    return;
-  }
-
-  unsigned long nowUs = micros();
-  unsigned long pulseWidth = nowUs - pulseStartUs[channel];
-
-  if (pulseWidth >= 800 && pulseWidth <= 2200) {
-    rcUs[channel] = (int)pulseWidth;
-    lastValidPulseUs[channel] = nowUs;
-  }
+void setupMotor(const MotorPins &motor) {
+  pinMode(motor.a, OUTPUT);
+  pinMode(motor.b, OUTPUT);
+  analogWrite(motor.a, 0);
+  analogWrite(motor.b, 0);
 }
 
-void handleChannel1() { handlePwmChange(0); }
-void handleChannel2() { handlePwmChange(1); }
-void handleChannel3() { handlePwmChange(2); }
-void handleChannel4() { handlePwmChange(3); }
-void handleChannel5() { handlePwmChange(4); }
-
-ISR(PCINT0_vect) {
-  bool pin10High = (PINB & _BV(PB4)) != 0;
-
-  if (pin10High != lastPwmPin10High) {
-    lastPwmPin10High = pin10High;
-    handleChannel5();
-  }
-}
-
-void setupPwmInputInterrupts() {
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[0]), handleChannel1, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[1]), handleChannel2, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[2]), handleChannel3, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(pwmInputPins[3]), handleChannel4, CHANGE);
-
-  lastPwmPin10High = digitalRead(pwmInputPins[4]) == HIGH;
-  PCICR |= _BV(PCIE0);
-  PCMSK0 |= _BV(PCINT4);
-}
-
-void setupMotor(const DcMotorPins &motor) {
-  pinMode(motor.en, OUTPUT);
-  pinMode(motor.in1, OUTPUT);
-  pinMode(motor.in2, OUTPUT);
-  analogWrite(motor.en, 0);
-  digitalWrite(motor.in1, LOW);
-  digitalWrite(motor.in2, LOW);
-}
-
-void setMotor(const DcMotorPins &motor, int speed) {
+void setMotor(const MotorPins &motor, int speed) {
   speed = constrain(speed, -255, 255);
 
   if (speed == 0) {
-    analogWrite(motor.en, 0);
-    digitalWrite(motor.in1, LOW);
-    digitalWrite(motor.in2, LOW);
+    analogWrite(motor.a, 0);
+    analogWrite(motor.b, 0);
     return;
   }
 
   if (speed > 0) {
-    digitalWrite(motor.in1, HIGH);
-    digitalWrite(motor.in2, LOW);
-    analogWrite(motor.en, speed);
+    analogWrite(motor.a, speed);
+    analogWrite(motor.b, 0);
   } else {
-    digitalWrite(motor.in1, LOW);
-    digitalWrite(motor.in2, HIGH);
-    analogWrite(motor.en, -speed);
+    analogWrite(motor.a, 0);
+    analogWrite(motor.b, -speed);
   }
 }
 
-void setDriveMotor(byte motorNumber, int speed) {
-  if (motorNumber < 1 || motorNumber > DRIVE_MOTOR_COUNT) {
+void setMotorFullDigital(const MotorPins &motor, int speed) {
+  if (speed == 0) {
+    digitalWrite(motor.a, LOW);
+    digitalWrite(motor.b, LOW);
+  } else if (speed > 0) {
+    digitalWrite(motor.a, HIGH);
+    digitalWrite(motor.b, LOW);
+  } else {
+    digitalWrite(motor.a, LOW);
+    digitalWrite(motor.b, HIGH);
+  }
+}
+
+void setMotorByNumber(byte motorNumber, int speed) {
+  if (motorNumber < 1 || motorNumber > MOTOR_COUNT) {
     return;
   }
 
-  setMotor(driveMotors[motorNumber - 1], speed);
+  if (motorNumber == ARM_MOTOR_NUMBER || motorNumber == BUNKER_MOTOR_NUMBER) {
+    setMotorFullDigital(motors[motorNumber - 1], speed);
+  } else {
+    setMotor(motors[motorNumber - 1], speed);
+  }
 }
 
 void setDriveMotorGroup(const byte motorNumbers[], byte count, int speed) {
   for (byte i = 0; i < count; i++) {
-    setDriveMotor(motorNumbers[i], speed);
+    setMotorByNumber(motorNumbers[i], speed);
   }
 }
 
@@ -170,6 +147,16 @@ int centeredRcToSpeed(int rcValue) {
   return map(centered, -RC_DEADBAND_US, -500, 0, -255);
 }
 
+int centeredRcToFullSpeed(int rcValue) {
+  int centered = constrain(rcValue, RC_MIN_US, RC_MAX_US) - RC_CENTER_US;
+
+  if (abs(centered) <= RC_DEADBAND_US) {
+    return 0;
+  }
+
+  return centered > 0 ? 255 : -255;
+}
+
 void driveFromChannels(int throttleUs, int steeringUs) {
   int throttle = centeredRcToSpeed(throttleUs);
   int steering = centeredRcToSpeed(steeringUs);
@@ -181,27 +168,17 @@ void driveFromChannels(int throttleUs, int steeringUs) {
   setDriveMotorGroup(rightDriveMotorNumbers, DRIVE_MOTORS_PER_SIDE, rightSpeed);
 }
 
-int centeredRcToFullSpeed(int rcValue) {
-  int centered = constrain(rcValue, RC_MIN_US, RC_MAX_US) - RC_CENTER_US;
-
-  if (abs(centered) <= RC_DEADBAND_US) {
-    return 0;
-  }
-
-  return centered > 0 ? 255 : -255;
-}
-
 void armFromChannel(int armUs) {
-  setMotor(armLiftMotor, centeredRcToFullSpeed(armUs));
+  setMotorByNumber(ARM_MOTOR_NUMBER, centeredRcToFullSpeed(armUs));
 }
 
 void bunkerFromChannel(int bunkerUs) {
   if (bunkerUs < 1400) {
-    setMotor(bunkerLiftMotor, -255);
+    setMotorByNumber(BUNKER_MOTOR_NUMBER, -255);
   } else if (bunkerUs > 1600) {
-    setMotor(bunkerLiftMotor, 255);
+    setMotorByNumber(BUNKER_MOTOR_NUMBER, 255);
   } else {
-    setMotor(bunkerLiftMotor, 0);
+    setMotorByNumber(BUNKER_MOTOR_NUMBER, 0);
   }
 }
 
@@ -234,24 +211,82 @@ void runShovelStepper() {
   }
 }
 
-void readChannelsSafe(int channels[]) {
+void updatePwmInputs() {
   unsigned long nowUs = micros();
-  unsigned long lastPulseCopy[PWM_CHANNEL_COUNT];
 
-  noInterrupts();
-  for (byte i = 0; i < PWM_CHANNEL_COUNT; i++) {
-    channels[i] = rcUs[i];
-    lastPulseCopy[i] = lastValidPulseUs[i];
-  }
-  interrupts();
+  for (byte i = 0; i < CHANNEL_COUNT; i++) {
+    unsigned long pulseWidth = pulseIn(pwmInputPins[i], HIGH, 2500UL);
 
-  for (byte i = 0; i < PWM_CHANNEL_COUNT; i++) {
-    if ((nowUs - lastPulseCopy[i]) > SIGNAL_TIMEOUT_US) {
-      channels[i] = RC_CENTER_US;
+    if (pulseWidth >= 800 && pulseWidth <= 2200) {
+      rcUs[i] = (int)pulseWidth;
+      lastValidPwmUs[i] = nowUs;
     }
   }
+}
 
-  if ((nowUs - lastPulseCopy[3]) > SIGNAL_TIMEOUT_US) {
+bool parseSerialPacket(char *line) {
+  int parsed[CHANNEL_COUNT];
+  char *token = strtok(line, ",");
+
+  for (byte i = 0; i < CHANNEL_COUNT; i++) {
+    if (token == NULL) {
+      return false;
+    }
+
+    parsed[i] = constrain(atoi(token), 800, 2200);
+    token = strtok(NULL, ",");
+  }
+
+  for (byte i = 0; i < CHANNEL_COUNT; i++) {
+    serialUs[i] = parsed[i];
+  }
+
+  lastSerialPacketMs = millis();
+  return true;
+}
+
+void updateSerialControl() {
+  static char lineBuffer[48];
+  static byte lineLength = 0;
+
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\r') {
+      continue;
+    }
+
+    if (c == '\n') {
+      lineBuffer[lineLength] = '\0';
+      parseSerialPacket(lineBuffer);
+      lineLength = 0;
+      continue;
+    }
+
+    if (lineLength < sizeof(lineBuffer) - 1) {
+      lineBuffer[lineLength++] = c;
+    } else {
+      lineLength = 0;
+    }
+  }
+}
+
+void readChannels(int channels[]) {
+  bool useSerial = (millis() - lastSerialPacketMs) <= SERIAL_CONTROL_TIMEOUT_MS;
+  unsigned long nowUs = micros();
+
+  if (useSerial) {
+    for (byte i = 0; i < CHANNEL_COUNT; i++) {
+      channels[i] = serialUs[i];
+    }
+    return;
+  }
+
+  for (byte i = 0; i < CHANNEL_COUNT; i++) {
+    channels[i] = ((nowUs - lastValidPwmUs[i]) > PWM_SIGNAL_TIMEOUT_US) ? RC_CENTER_US : rcUs[i];
+  }
+
+  if ((nowUs - lastValidPwmUs[3]) > PWM_SIGNAL_TIMEOUT_US) {
     channels[3] = SHOVEL_OFF_US;
   }
 }
@@ -272,31 +307,28 @@ void printChannels(const int channels[]) {
 void setup() {
   Serial.begin(115200);
 
-  for (byte i = 0; i < PWM_CHANNEL_COUNT; i++) {
+  for (byte i = 0; i < CHANNEL_COUNT; i++) {
     pinMode(pwmInputPins[i], INPUT);
-    lastValidPulseUs[i] = micros();
+    lastValidPwmUs[i] = micros();
   }
 
-  for (byte i = 0; i < DRIVE_MOTOR_COUNT; i++) {
-    setupMotor(driveMotors[i]);
+  for (byte i = 0; i < MOTOR_COUNT; i++) {
+    setupMotor(motors[i]);
   }
-
-  setupMotor(armLiftMotor);
-  setupMotor(bunkerLiftMotor);
 
   pinMode(SHOVEL_STEP_PIN, OUTPUT);
   pinMode(SHOVEL_DIR_PIN, OUTPUT);
   digitalWrite(SHOVEL_STEP_PIN, LOW);
   digitalWrite(SHOVEL_DIR_PIN, SHOVEL_FIXED_DIR);
-
-  setupPwmInputInterrupts();
 }
 
 void loop() {
   static unsigned long lastPrintMs = 0;
-  int channels[PWM_CHANNEL_COUNT];
+  int channels[CHANNEL_COUNT];
 
-  readChannelsSafe(channels);
+  updateSerialControl();
+  updatePwmInputs();
+  readChannels(channels);
 
   driveFromChannels(channels[0], channels[1]);
   armFromChannel(channels[2]);
