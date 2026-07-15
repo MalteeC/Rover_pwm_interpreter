@@ -13,14 +13,15 @@
 //   S5 pin 32 = bunker up/down, <1400 one way, >1600 other way
 //
 // L298N motor pins, two wires per motor:
-//   M1 left front:   A 2,  B 3   (both PWM)
-//   M2 right front:  A 4,  B 5   (both PWM)
-//   M3 left middle:  A 6,  B 7   (both PWM)
-//   M4 right middle: A 8,  B 9   (both PWM)
-//   M5 left rear:    A 10, B 11  (both PWM)
-//   M6 right rear:   A 12, B 13  (both PWM)
-//   M7 arm:          A 24, B 25  (full speed digital)
-//   M8 bunker:       A 28, B 29  (full speed digital)
+//   A pins are direction pins, B pins are native Mega PWM pins.
+//   M1 left front:   A 24, B 11
+//   M2 right front:  A 28, B 7
+//   M3 left middle:  A 22, B 12
+//   M4 right middle: A 26, B 8
+//   M5 left rear:    A 23, B 13
+//   M6 right rear:   A 27, B 9
+//   M7 arm:          A 25, B 10
+//   M8 bunker:       A 29, B 6
 //
 // DRV8825 for NEMA17 shovel wheel rotation:
 //   STEP pin 45
@@ -51,14 +52,14 @@ const byte MOTOR_COUNT = 8;
 const byte DRIVE_MOTORS_PER_SIDE = 3;
 
 const MotorPins motors[MOTOR_COUNT] = {
-  {2, 3},    // M1: left front, PWM/PWM
-  {4, 5},    // M2: right front, PWM/PWM
-  {6, 7},    // M3: left middle, PWM/PWM
-  {8, 9},    // M4: right middle, PWM/PWM
-  {10, 11},  // M5: left rear, PWM/PWM
-  {12, 13},  // M6: right rear, PWM/PWM
-  {24, 25},  // M7: arm, full speed digital
-  {28, 29}   // M8: bunker, full speed digital
+  {24, 11},  // M1: left front, B is PWM
+  {28, 7},   // M2: right front, B is PWM
+  {22, 12},  // M3: left middle, B is PWM
+  {26, 8},   // M4: right middle, B is PWM
+  {23, 13},  // M5: left rear, B is PWM
+  {27, 9},   // M6: right rear, B is PWM
+  {25, 10},  // M7: arm, B is PWM
+  {29, 6}    // M8: bunker, B is PWM
 };
 
 const byte leftDriveMotorNumbers[DRIVE_MOTORS_PER_SIDE] = {1, 3, 5};
@@ -80,7 +81,7 @@ unsigned long shovelStepIntervalUs = 0;
 void setupMotor(const MotorPins &motor) {
   pinMode(motor.a, OUTPUT);
   pinMode(motor.b, OUTPUT);
-  analogWrite(motor.a, 0);
+  digitalWrite(motor.a, LOW);
   analogWrite(motor.b, 0);
 }
 
@@ -88,30 +89,17 @@ void setMotor(const MotorPins &motor, int speed) {
   speed = constrain(speed, -255, 255);
 
   if (speed == 0) {
-    analogWrite(motor.a, 0);
+    digitalWrite(motor.a, LOW);
     analogWrite(motor.b, 0);
     return;
   }
 
   if (speed > 0) {
-    analogWrite(motor.a, speed);
-    analogWrite(motor.b, 0);
-  } else {
-    analogWrite(motor.a, 0);
-    analogWrite(motor.b, -speed);
-  }
-}
-
-void setMotorFullDigital(const MotorPins &motor, int speed) {
-  if (speed == 0) {
-    digitalWrite(motor.a, LOW);
-    digitalWrite(motor.b, LOW);
-  } else if (speed > 0) {
     digitalWrite(motor.a, HIGH);
-    digitalWrite(motor.b, LOW);
+    analogWrite(motor.b, 255 - speed);
   } else {
     digitalWrite(motor.a, LOW);
-    digitalWrite(motor.b, HIGH);
+    analogWrite(motor.b, -speed);
   }
 }
 
@@ -120,11 +108,7 @@ void setMotorByNumber(byte motorNumber, int speed) {
     return;
   }
 
-  if (motorNumber == ARM_MOTOR_NUMBER || motorNumber == BUNKER_MOTOR_NUMBER) {
-    setMotorFullDigital(motors[motorNumber - 1], speed);
-  } else {
-    setMotor(motors[motorNumber - 1], speed);
-  }
+  setMotor(motors[motorNumber - 1], speed);
 }
 
 void setDriveMotorGroup(const byte motorNumbers[], byte count, int speed) {
@@ -341,5 +325,6 @@ void loop() {
     printChannels(channels);
   }
 }
+
 
 
